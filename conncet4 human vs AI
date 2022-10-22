@@ -1,200 +1,288 @@
-import requests
-import json
-import turtle
+import numpy as np
+import random
+import pygame
+import sys
+import math
 
-object_id = "61b40e5bd4fd14660005b16f"
-url = "https://connect4-0745.restdb.io/rest/board" + "/" + object_id
-headers = {
-    'content-type': "application/json",
-    'x-apikey': "a2091b5ec57c3c776fec38563fb9a0288b8c4",
-    'cache-control': "no-cache"
-}
+BLUE = (0,0,255)
+BLACK = (0,0,0)
+RED = (255,0,0)
+YELLOW = (255,255,0)
 
-def clear_db():
-    payload = json.dumps({str(i) : " ".join([str(0)]*COLS) for i in range(ROWS)})
-    response = requests.put(url, data=payload, headers=headers)
-    if response.status_code == 200:
-        print("Successfully cleared database for game")
+ROW_COUNT = 6
+COLUMN_COUNT = 7
 
-def refresh():
-    update = False
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        print(f"Error {response.status_code} while refreshing:\n{response.text}")
-    else:
-        for row, data in response.json().items():
-            try:
-                cols = [int(d) for d in data.split()]
-                if cols != BOARD[int(row)]:
-                    for n, col in enumerate(zip(BOARD[int(row)], cols)):
-                        col1, col2 = col
-                        if col1 != col2:
-                            left_x = STARTX + n*(WIDTH/COLS)
-                            right_x = STARTX + (n+1)*(WIDTH/COLS)
-                            x = (left_x+right_x)/2
+PLAYER = 0
+AI = 1
 
-                            left_y = STARTY + (int(row))*(HEIGHT/ROWS)
-                            right_y = STARTY + (int(row)+1)*(HEIGHT/ROWS)
-                            y = (left_y + right_y)/2
+EMPTY = 0
+PLAYER_PIECE = 1
+AI_PIECE = 2
 
-                            play(x, y, refresh=True)
-                            update = True
-            except:
-                pass
+WINDOW_LENGTH = 4
 
-    if update:
-        print("Successfully refreshed board from database")
-    else:
-        print("No new data has been updated. Waiting for the other player to make their move.")
+def create_board():
+	board = np.zeros((ROW_COUNT,COLUMN_COUNT))
+	return board
 
-    turtle.ontimer(lambda: refresh(), 1000)
+def drop_piece(board, row, col, piece):
+	board[row][col] = piece
 
-SCREEN = turtle.Screen()
-ROWS = 7
-COLS = 6
-STARTX = -450
-STARTY = -450 * (ROWS / COLS)
-WIDTH = -2 * STARTX
-HEIGHT = -2 * STARTY
-RADIUS = 48
+def is_valid_location(board, col):
+	return board[ROW_COUNT-1][col] == 0
 
-BOARD = []
-TURN = 1
+def get_next_open_row(board, col):
+	for r in range(ROW_COUNT):
+		if board[r][col] == 0:
+			return r
 
+def print_board(board):
+	print(np.flip(board, 0))
 
-def draw_rectangle(x, y, w, h, color):
-    turtle.penup()
-    turtle.goto(x, y)
-    turtle.pendown()
-    turtle.fillcolor(color)
-    turtle.begin_fill()
-    turtle.goto(x+w, y)
-    turtle.goto(x+w, y+h)
-    turtle.goto(x, y+h)
-    turtle.goto(x, y)
-    turtle.end_fill()
+def winning_move(board, piece):
+	# Check horizontal locations for win
+	for c in range(COLUMN_COUNT-3):
+		for r in range(ROW_COUNT):
+			if board[r][c] == piece and board[r][c+1] == piece and board[r][c+2] == piece and board[r][c+3] == piece:
+				return True
 
+	# Check vertical locations for win
+	for c in range(COLUMN_COUNT):
+		for r in range(ROW_COUNT-3):
+			if board[r][c] == piece and board[r+1][c] == piece and board[r+2][c] == piece and board[r+3][c] == piece:
+				return True
 
-def draw_circle(x, y, r, color):
-    turtle.penup()
-    turtle.goto(x, y-r)
-    turtle.pendown()
-    turtle.fillcolor(color)
-    turtle.begin_fill()
-    turtle.circle(r)
-    turtle.end_fill()
+	# Check positively sloped diaganols
+	for c in range(COLUMN_COUNT-3):
+		for r in range(ROW_COUNT-3):
+			if board[r][c] == piece and board[r+1][c+1] == piece and board[r+2][c+2] == piece and board[r+3][c+3] == piece:
+				return True
 
+	# Check negatively sloped diaganols
+	for c in range(COLUMN_COUNT-3):
+		for r in range(3, ROW_COUNT):
+			if board[r][c] == piece and board[r-1][c+1] == piece and board[r-2][c+2] == piece and board[r-3][c+3] == piece:
+				return True
 
-def draw_pieces(board, X, Y, radius, i, j):
-    board_legend = {0 : "white", 1 : "red", 2 : "yellow"}
-    for i in range(ROWS):
-        for j in range(COLS):
-            left_x = STARTX + j*(WIDTH/COLS)
-            right_x = STARTX + (j+1)*(WIDTH/COLS)
-            left_y = STARTY + i*(HEIGHT/ROWS)
-            right_y = STARTY + (i+1)*(HEIGHT/ROWS)
-            draw_circle((left_x+right_x)/2, (left_y+right_y)/2, radius, board_legend[board[i][j]])
+def evaluate_window(window, piece):
+	score = 0
+	opp_piece = PLAYER_PIECE
+	if piece == PLAYER_PIECE:
+		opp_piece = AI_PIECE
+
+	if window.count(piece) == 4:
+		score += 100
+	elif window.count(piece) == 3 and window.count(EMPTY) == 1:
+		score += 5
+	elif window.count(piece) == 2 and window.count(EMPTY) == 2:
+		score += 2
+
+	if window.count(opp_piece) == 3 and window.count(EMPTY) == 1:
+		score -= 4
+
+	return score
+
+def score_position(board, piece):
+	score = 0
+
+	## Score center column
+	center_array = [int(i) for i in list(board[:, COLUMN_COUNT//2])]
+	center_count = center_array.count(piece)
+	score += center_count * 3
+
+	## Score Horizontal
+	for r in range(ROW_COUNT):
+		row_array = [int(i) for i in list(board[r,:])]
+		for c in range(COLUMN_COUNT-3):
+			window = row_array[c:c+WINDOW_LENGTH]
+			score += evaluate_window(window, piece)
+
+	## Score Vertical
+	for c in range(COLUMN_COUNT):
+		col_array = [int(i) for i in list(board[:,c])]
+		for r in range(ROW_COUNT-3):
+			window = col_array[r:r+WINDOW_LENGTH]
+			score += evaluate_window(window, piece)
+
+	## Score posiive sloped diagonal
+	for r in range(ROW_COUNT-3):
+		for c in range(COLUMN_COUNT-3):
+			window = [board[r+i][c+i] for i in range(WINDOW_LENGTH)]
+			score += evaluate_window(window, piece)
+
+	for r in range(ROW_COUNT-3):
+		for c in range(COLUMN_COUNT-3):
+			window = [board[r+3-i][c+i] for i in range(WINDOW_LENGTH)]
+			score += evaluate_window(window, piece)
+
+	return score
+
+def is_terminal_node(board):
+	return winning_move(board, PLAYER_PIECE) or winning_move(board, AI_PIECE) or len(get_valid_locations(board)) == 0
+
+def minimax(board, depth, alpha, beta, maximizingPlayer):
+	valid_locations = get_valid_locations(board)
+	is_terminal = is_terminal_node(board)
+	if depth == 0 or is_terminal:
+		if is_terminal:
+			if winning_move(board, AI_PIECE):
+				return (None, 100000000000000)
+			elif winning_move(board, PLAYER_PIECE):
+				return (None, -10000000000000)
+			else: 
+				return (None, 0)
+		else:
+			return (None, score_position(board, AI_PIECE))
+	if maximizingPlayer:
+		value = -math.inf
+		column = random.choice(valid_locations)
+		for col in valid_locations:
+			row = get_next_open_row(board, col)
+			b_copy = board.copy()
+			drop_piece(b_copy, row, col, AI_PIECE)
+			new_score = minimax(b_copy, depth-1, alpha, beta, False)[1]
+			if new_score > value:
+				value = new_score
+				column = col
+			alpha = max(alpha, value)
+			if alpha >= beta:
+				break
+		return column, value
+
+	else:
+		value = math.inf
+		column = random.choice(valid_locations)
+		for col in valid_locations:
+			row = get_next_open_row(board, col)
+			b_copy = board.copy()
+			drop_piece(b_copy, row, col, PLAYER_PIECE)
+			new_score = minimax(b_copy, depth-1, alpha, beta, True)[1]
+			if new_score < value:
+				value = new_score
+				column = col
+			beta = min(beta, value)
+			if alpha >= beta:
+				break
+		return column, value
+
+def get_valid_locations(board):
+	valid_locations = []
+	for col in range(COLUMN_COUNT):
+		if is_valid_location(board, col):
+			valid_locations.append(col)
+	return valid_locations
+
+def pick_best_move(board, piece):
+
+	valid_locations = get_valid_locations(board)
+	best_score = -10000
+	best_col = random.choice(valid_locations)
+	for col in valid_locations:
+		row = get_next_open_row(board, col)
+		temp_board = board.copy()
+		drop_piece(temp_board, row, col, piece)
+		score = score_position(temp_board, piece)
+		if score > best_score:
+			best_score = score
+			best_col = col
+
+	return best_col
 
 def draw_board(board):
-    draw_rectangle(STARTX, STARTY, WIDTH, HEIGHT, "blue")
-    draw_pieces(board, STARTX, STARTY, RADIUS, WIDTH, HEIGHT)
+	for c in range(COLUMN_COUNT):
+		for r in range(ROW_COUNT):
+			pygame.draw.rect(screen, BLUE, (c*SQUARESIZE, r*SQUARESIZE+SQUARESIZE, SQUARESIZE, SQUARESIZE))
+			pygame.draw.circle(screen, BLACK, (int(c*SQUARESIZE+SQUARESIZE/2), int(r*SQUARESIZE+SQUARESIZE+SQUARESIZE/2)), RADIUS)
 
-def init_board():
-    global BOARD, SCREEN
+	for c in range(COLUMN_COUNT):
+		for r in range(ROW_COUNT):
+			if board[r][c] == PLAYER_PIECE:
+				pygame.draw.circle(screen, RED, (int(c*SQUARESIZE+SQUARESIZE/2), height-int(r*SQUARESIZE+SQUARESIZE/2)), RADIUS)
+			elif board[r][c] == AI_PIECE:
+				pygame.draw.circle(screen, YELLOW, (int(c*SQUARESIZE+SQUARESIZE/2), height-int(r*SQUARESIZE+SQUARESIZE/2)), RADIUS)
+	pygame.display.update()
 
-    SCREEN.setup(500, 500)
-    SCREEN.setworldcoordinates(-500, -500, 500, 500)
-    SCREEN.title("Connect 4 - "+player.title())
-    SCREEN.bgcolor("white")
-    turtle.speed(0)
-    turtle.hideturtle()
-    SCREEN.tracer(0, 0)
+board = create_board()
+print_board(board)
+game_over = False
 
-    for i in range(ROWS):
-        row = []
-        for j in range(COLS):
-            row.append(0)
-        BOARD.append(row)
+pygame.init()
 
-    draw_board(BOARD)
+SQUARESIZE = 100
 
-def play(x, y, refresh=False):
-    global BOARD, TURN
-    board_legend = {0 : "white", 1 : "red", 2 : "yellow"}
+width = COLUMN_COUNT * SQUARESIZE
+height = (ROW_COUNT+1) * SQUARESIZE
 
-    if refresh or board_legend[TURN] == player:
-        TURN_DONE = False
-        for i in range(ROWS):
-            for j in range(COLS):
-                left_x = STARTX + j*(WIDTH/COLS)
-                right_x = STARTX + (j+1)*(WIDTH/COLS)
-                if left_x <= x <= right_x:
-                    for k in range(ROWS):
-                        if TURN_DONE:
-                            break
-                        if BOARD[k][j] == 0:
-                            left_y = STARTY + (k)*(HEIGHT/ROWS)
-                            right_y = STARTY + (k+1)*(HEIGHT/ROWS)
-                            BOARD[k][j] = TURN
-                            draw_circle((left_x+right_x)/2, (left_y+right_y)/2, RADIUS, board_legend[TURN])
-                            turtle.update()
-                            TURN = 2 if TURN == 1 else 1
-                            TURN_DONE = True
+size = (width, height)
 
-                            if not refresh:
-                                payload = json.dumps({str(k) : " ".join([str(i) for i in BOARD[k]])})
-                                response = requests.put(url, data=payload, headers=headers)
-                                if response.status_code == 200:
-                                    print("Successfully pushed the updated board to database.")
-                                else:
-                                    print(f"An error {response.status_code} occurred while pushing the updated board to the database.\n{response.text}")
-    else:
-        print("It is not your turn. Please wait for the other player to make their move.")
-        return
+RADIUS = int(SQUARESIZE/2 - 5)
 
-    # Getting all possible combinations
-    combinations = []
-    for i in range(ROWS):
-        for j in range(COLS):
-            combo_vertical, combo_horizontal, combo_diagonal_1, combo_diagonal_2 = [], [], [], []
-            for k in range(4):
-                if i+k < 7: combo_vertical.append(BOARD[i+k][j])
-                if j+k < 6: combo_horizontal.append(BOARD[i][j+k])
-                if i+k < 7 and j+k < 6: combo_diagonal_1.append(BOARD[i+k][j+k])
-                if j+k < 6 and i-k >= 0: combo_diagonal_2.append(BOARD[i-k][j+k])
-            combinations.append(combo_vertical)
-            combinations.append(combo_horizontal)
-            combinations.append(combo_diagonal_1)
-            combinations.append(combo_diagonal_2)
+screen = pygame.display.set_mode(size)
+draw_board(board)
+pygame.display.update()
 
-    text = None
-    for combo in combinations:
-        if len(combo) == 4 and len(set(combo)) == 1 and combo[0] != 0:
-            if combo[0] == 1: text = "PLAYER 'RED' WON."
-            if combo[0] == 2: text = "PLAYER 'YELLOW' WON."
+myfont = pygame.font.SysFont("monospace", 75)
 
-    if not text:
-        empty = 0
-        for i in range(ROWS):
-            for j in range(COLS):
-                if BOARD[i][j]: empty += 1
-        if not empty: text = "IT IS A TIE."
+turn = random.randint(PLAYER, AI)
 
-    if text:
-        turtle.textinput("GAME OVER", text + " Would you like to play again?")
-        SCREEN.clear()
-        BOARD = []
-        TURN = 1
-        clear_db()
-        init_board()
-        SCREEN.onclick(play)
-        SCREEN.mainloop()
+while not game_over:
+
+	for event in pygame.event.get():
+		if event.type == pygame.QUIT:
+			sys.exit()
+
+		if event.type == pygame.MOUSEMOTION:
+			pygame.draw.rect(screen, BLACK, (0,0, width, SQUARESIZE))
+			posx = event.pos[0]
+			if turn == PLAYER:
+				pygame.draw.circle(screen, RED, (posx, int(SQUARESIZE/2)), RADIUS)
+
+		pygame.display.update()
+
+		if event.type == pygame.MOUSEBUTTONDOWN:
+			pygame.draw.rect(screen, BLACK, (0,0, width, SQUARESIZE))
+
+			if turn == PLAYER:
+				posx = event.pos[0]
+				col = int(math.floor(posx/SQUARESIZE))
+
+				if is_valid_location(board, col):
+					row = get_next_open_row(board, col)
+					drop_piece(board, row, col, PLAYER_PIECE)
+
+					if winning_move(board, PLAYER_PIECE):
+						label = myfont.render("Player 1 wins!!", 1, RED)
+						screen.blit(label, (40,10))
+						game_over = True
+
+					turn += 1
+					turn = turn % 2
+
+					print_board(board)
+					draw_board(board)
 
 
-if __name__ == "__main__":
-    clear_db()
-    player = input("Which player would you like to play as? (red/yellow): ").lower()
-    init_board()
-    SCREEN.onclick(play)
-    refresh()
-    SCREEN.mainloop()
+
+	if turn == AI and not game_over:
+
+
+		col, minimax_score = minimax(board, 5, -math.inf, math.inf, True)
+
+		if is_valid_location(board, col):
+
+			row = get_next_open_row(board, col)
+			drop_piece(board, row, col, AI_PIECE)
+
+			if winning_move(board, AI_PIECE):
+				label = myfont.render("Player 2 wins!!", 1, YELLOW)
+				screen.blit(label, (40,10))
+				game_over = True
+
+			print_board(board)
+			draw_board(board)
+
+			turn += 1
+			turn = turn % 2
+
+	if game_over:
+		pygame.time.wait(3000)
